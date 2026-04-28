@@ -52,6 +52,11 @@ def configure_observability(service_name: str, config: ObsConfig | None = None) 
         _, handler = setup_logs(config.endpoint, headers, resource)
         setup_instruments()
 
+        # Suppress HTTP client loggers — auto-instrumentation already creates
+        # spans for these calls, so the Python log lines are pure duplication.
+        for noisy_logger in ("httpx", "httpcore", "urllib3", "requests"):
+            logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
         _log_handler = handler
         _configured = True
 
