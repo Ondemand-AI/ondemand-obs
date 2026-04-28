@@ -41,9 +41,14 @@ def configure_observability(service_name: str, config: ObsConfig | None = None) 
         if _configured:
             return
 
-        resource = Resource.create({
+        attrs = {
             SERVICE_NAME: os.environ.get("OTEL_SERVICE_NAME", service_name),
-        })
+        }
+        env = os.environ.get("DEPLOYMENT_ENVIRONMENT", "")
+        if env:
+            attrs["deployment.environment"] = env
+
+        resource = Resource.create(attrs)
 
         headers = {"authorization": config.api_key}
 
