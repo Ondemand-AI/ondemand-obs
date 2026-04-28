@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ondemand-obs"
+version = "0.1.0"
+description = "OpenTelemetry observability layer for the Ondemand platform"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Ondemand AI", email = "dev@ondemand-ai.com.br"}
+]
+keywords = ["opentelemetry", "observability", "tracing", "ondemand"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Software Development :: Libraries",
+]
+
+dependencies = [
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-http>=1.27",
+    "opentelemetry-instrumentation-httpx>=0.48",
+    "opentelemetry-instrumentation-requests>=0.48",
+]
+
+[project.optional-dependencies]
+temporal = ["temporalio>=1.7.0"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.urls]
+Homepage = "https://ondemand-ai.com.br"
+Repository = "https://github.com/Ondemand-AI/ondemand-obs"
+
+[tool.setuptools.packages.find]
+include = ["ondemand_obs*"]
