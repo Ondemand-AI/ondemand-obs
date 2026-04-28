@@ -2,17 +2,14 @@ _BODY_CAPTURE_MAX = 4096
 
 
 def _httpx_request_hook(span, request):
-    if request.content:
-        body = request.content.decode("utf-8", errors="replace")[:_BODY_CAPTURE_MAX]
-        span.set_attribute("http.request.body", body)
-
-
-def _httpx_response_hook(span, request, response):
-    if hasattr(response, "text"):
-        span.set_attribute("http.response.body", response.text[:_BODY_CAPTURE_MAX])
-    elif hasattr(response, "content"):
-        span.set_attribute("http.response.body",
-                           response.content.decode("utf-8", errors="replace")[:_BODY_CAPTURE_MAX])
+    try:
+        stream = getattr(request, "stream", None)
+        if stream is not None and hasattr(stream, "_buffer"):
+            body = stream._buffer.decode("utf-8", errors="replace")[:_BODY_CAPTURE_MAX]
+            if body:
+                span.set_attribute("http.request.body", body)
+    except Exception:
+        pass
 
 
 def setup_instruments() -> None:
@@ -21,7 +18,6 @@ def setup_instruments() -> None:
         from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
         HTTPXClientInstrumentor().instrument(
             request_hook=_httpx_request_hook,
-            response_hook=_httpx_response_hook,
         )
     except ImportError:
         pass
