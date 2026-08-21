@@ -12,6 +12,7 @@ Set HYPERDX_API_KEY in env to enable. No-op if the key is absent.
 import logging
 import os
 import threading
+from importlib.metadata import PackageNotFoundError, version as _dist_version
 
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME
 
@@ -22,6 +23,25 @@ from .logs import setup_logs
 from .instruments import setup_instruments
 
 logger = logging.getLogger("ondemand_obs")
+
+
+def _dist(name: str) -> str | None:
+    try:
+        return _dist_version(name)
+    except PackageNotFoundError:
+        return None
+
+
+__version__ = _dist("ondemand-obs") or "0.0.0.dev0"
+
+# Library versions are stamped onto every span, metric and log as resource
+# attributes. Robots may upgrade ondemand-ai at container start, so the image
+# tag no longer implies which library version is running — this is the only
+# reliable way to answer "which robots are on which version?" in HyperDX.
+_LIB_ATTRS = {
+    "ondemand.ai.version": _dist("ondemand-ai"),
+    "ondemand.obs.version": __version__,
+}
 
 _configured = False
 _lock = threading.Lock()
@@ -48,6 +68,8 @@ def configure_observability(service_name: str, config: ObsConfig | None = None) 
         if env:
             attrs["deployment.environment"] = env
 
+        attrs.update({k: v for k, v in _LIB_ATTRS.items() if v})
+
         resource = Resource.create(attrs)
 
         headers = {"authorization": config.api_key}
@@ -65,7 +87,11 @@ def configure_observability(service_name: str, config: ObsConfig | None = None) 
         _log_handler = handler
         _configured = True
 
-        logger.info(f"ondemand-obs: observability enabled for service '{service_name}'")
+        logger.info(
+            f"ondemand-obs: observability enabled for service '{service_name}' "
+            f"(ondemand-ai={_LIB_ATTRS['ondemand.ai.version'] or 'n/a'}, "
+            f"ondemand-obs={__version__})"
+        )
 
 
 def is_configured() -> bool:
