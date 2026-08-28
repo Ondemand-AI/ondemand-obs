@@ -7,6 +7,8 @@ from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 
+from .workflow_context import TemporalIdLogFilter
+
 # LoggingHandler bridges Python's logging module → OTel log records → OTLP exporter
 try:
     from opentelemetry.sdk._logs import LoggingHandler
@@ -53,4 +55,7 @@ def setup_logs(endpoint: str, headers: dict, resource: Resource) -> tuple:
     provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
     set_logger_provider(provider)
     handler = OndemandLoggingHandler(level=logging.NOTSET, logger_provider=provider)
+    # Every log line carries the Temporal identifier pair, so a run is a field
+    # filter in HyperDX rather than a full-text search for a UUID.
+    handler.addFilter(TemporalIdLogFilter())
     return provider, handler
