@@ -4,13 +4,13 @@ OpenTelemetry observability for the Ondemand platform. Ships traces, metrics, an
 
 - **PyPI name:** `ondemand-obs`
 - **Import path:** `ondemand_obs`
-- **Current version:** 0.1.8 (see `pyproject.toml`)
+- **Current version:** 0.1.9 (see `pyproject.toml`)
 - **Python:** ≥ 3.9
 - **Branch:** `main`
 
 ## How it's used
 
-Robots never call this directly — the `ondemand-ai[worker]` SDK depends on `ondemand-obs[temporal]` and calls `configure_observability(service_name)` automatically at worker startup. It is a **no-op when `HYPERDX_API_KEY` is absent**, so local runs without the key are silent and safe.
+Robots never call this directly — the `ondemand-ai[worker]` SDK depends on `ondemand-obs[temporal,llm]` and calls `configure_observability(service_name)` automatically at worker startup. It is a **no-op when `HYPERDX_API_KEY` is absent**, so local runs without the key are silent and safe.
 
 ```python
 from ondemand_obs import configure_observability
@@ -26,7 +26,7 @@ ondemand_obs/
 ├── traces.py        # TracerProvider + OTLP HTTP exporter
 ├── metrics.py       # MeterProvider setup
 ├── logs.py          # LoggerProvider + log handler
-├── instruments.py   # httpx/requests auto-instrumentation (captures HTTP bodies)
+├── instruments.py   # httpx/requests + LLM SDK auto-instrumentation, body capture policy
 └── temporal.py      # Temporal TracingInterceptor (requires [temporal] extra)
 ```
 
@@ -41,12 +41,28 @@ ondemand_obs/
 ## Extras
 
 - `[temporal]` — adds `temporalio>=1.7.0` for the Temporal `TracingInterceptor`
-- `[dev]` — pytest + pytest-asyncio
+- `[llm]` — OpenLLMetry instrumentors for the OpenAI and Anthropic SDKs (Python >= 3.10)
+- `[dev]` — pytest + pytest-asyncio + httpx + openai
+
+## What HTTP calls record (body policy, since 0.1.9)
+
+| Call | Recorded |
+|---|---|
+| Robot → our API (`*.ondemand-ai.com.br`) | Span + request body as `http.request.body` (JSON only, 4 KB). Keys that *contain* password/senha/secret/token/api_key/authorization/credential are `[redacted]`. |
+| Robot → any other host | Span (URL, method, status, duration). **No request body**: no field-name list can recognise every site's password field, so third-party bodies are never captured. |
+| Any host answering 4xx/5xx | A WARN log on `ondemand_obs.http_errors` with the response body (JSON redacted, text/plain truncated, HTML/binary skipped), in the same trace. That logger does NOT propagate to root, so it never reaches the portal console. |
+| OpenAI / Anthropic SDK (`[llm]`) | A `gen_ai` span: model, input/output tokens, finish reason, tool call names, latency, errors. Prompt and completion **text are off** (`TRACELOOP_TRACE_CONTENT=false` by default; a deploy may set it to `true`). |
+
+Playwright traffic is never seen: the browser's requests do not go through httpx.
+
+Before 0.1.9 the request-body hook read `stream._buffer`, a field httpx never had (it is `_stream`), so **no body was ever captured**. `tests/test_instruments.py` drives the real instrumentor end to end so this cannot silently regress again.
+
+The response body cannot be a span attribute: the httpx instrumentor ends the span before the client reads the body. That is why error bodies are logs, emitted from a wrapper around the public `Client.send` / `AsyncClient.send`.
 
 ## Tests
 
 ```bash
-pip install -e ".[dev,temporal]"
+pip install -e ".[dev,temporal,llm]"
 pytest
 ```
 

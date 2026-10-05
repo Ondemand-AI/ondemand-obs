@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ondemand-obs"
-version = "0.1.8"
+version = "0.1.9"
 description = "OpenTelemetry observability layer for the Ondemand platform"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -29,7 +29,12 @@ dependencies = [
 
 [project.optional-dependencies]
 temporal = ["temporalio>=1.7.0"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+# gen_ai spans for OpenAI / Anthropic SDK calls (OpenLLMetry). Python >= 3.10 only.
+llm = [
+    "opentelemetry-instrumentation-openai>=0.62; python_version >= '3.10'",
+    "opentelemetry-instrumentation-anthropic>=0.62; python_version >= '3.10'",
+]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "httpx", "openai"]
 
 [project.urls]
 Homepage = "https://ondemand-ai.com.br"

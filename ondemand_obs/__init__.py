@@ -77,7 +77,7 @@ def configure_observability(service_name: str, config: ObsConfig | None = None) 
         setup_traces(config.endpoint, headers, resource)
         setup_metrics(config.endpoint, headers, resource)
         _, handler = setup_logs(config.endpoint, headers, resource)
-        setup_instruments()
+        setup_instruments(log_handler=handler)
 
         # Suppress HTTP client loggers — auto-instrumentation already creates
         # spans for these calls, so the Python log lines are pure duplication.
