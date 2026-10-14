@@ -11,12 +11,20 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from ondemand_obs import instruments
 from ondemand_obs.instruments import (
-    _host_matches,
     _httpx_request_hook,
     _install_error_response_logging,
     _log_error_response,
     _redact,
+    _requests_request_hook,
+    _requests_response_hook,
+    register_secret,
 )
+
+
+@pytest.fixture(autouse=True)
+def no_secrets(monkeypatch):
+    """Each test starts with an empty secret registry."""
+    monkeypatch.setattr(instruments, "_secret_values", set())
 
 
 class _Span:
@@ -30,15 +38,17 @@ class _Span:
 class _RequestInfo:
     """Shape of what HTTPXClientInstrumentor passes to the request hook."""
 
-    def __init__(self, url, body):
-        request = httpx.Request("POST", url, content=body)
+    def __init__(self, url, body, content_type=None):
+        headers = {"content-type": content_type} if content_type else {}
+        request = httpx.Request("POST", url, content=body, headers=headers)
         self.url = request.url
+        self.headers = request.headers
         self.stream = request.stream
 
 
-def _capture(url, body):
+def _capture(url, body, content_type=None):
     span = _Span()
-    _httpx_request_hook(span, _RequestInfo(url, body))
+    _httpx_request_hook(span, _RequestInfo(url, body, content_type))
     return span.attributes.get("http.request.body")
 
 
@@ -53,7 +63,7 @@ STEP_REPORT = json.dumps({
 
 
 # --------------------------------------------------------------------------- #
-# Request bodies: our API only, secrets redacted
+# Request bodies: every host, our credentials removed
 # --------------------------------------------------------------------------- #
 
 def test_our_api_body_captured_with_only_secrets_redacted():
@@ -65,22 +75,78 @@ def test_our_api_body_captured_with_only_secrets_redacted():
     assert "abc" not in body and "def" not in body
 
 
-def test_dev_api_is_allowed():
-    assert _capture("https://api-dev.ondemand-ai.com.br/x", b'{"a": 1}') == '{"a": 1}'
+@pytest.mark.parametrize("url", [
+    "https://api.openai.com/v1/chat/completions",
+    "https://www.bb.com.br/api/extrato",
+    "https://cav.receita.fazenda.gov.br/",
+])
+def test_third_party_bodies_captured(url):
+    body = _capture(url, b'{"cnpj": "12.345.678/0001-90", "periodo": "2026-09"}')
+    assert json.loads(body) == {"cnpj": "12.345.678/0001-90", "periodo": "2026-09"}
+
+
+def test_form_body_captured_with_secret_keys_redacted():
+    body = _capture("https://www.bb.com.br/login", b"user=11122233344&txtSenha=segredo1",
+                    "application/x-www-form-urlencoded")
+    assert body == "user=11122233344&txtSenha=[redacted]"
+
+
+def test_vault_password_scrubbed_whatever_the_field_is_called():
+    """The point of scrubbing by value: a site's password field can be called
+    anything, and a key list would never know."""
+    register_secret("S3nh@ do cliente")
+    form = b"usr=joao&campo_x=S3nh%40+do+cliente&ok=1"
+    body = _capture("https://portal.prefeitura.gov.br/login", form,
+                    "application/x-www-form-urlencoded")
+    assert body == "usr=joao&campo_x=[redacted]&ok=1"
+
+    xml = b"<login><u>joao</u><p>S3nh@ do cliente</p></login>"
+    assert _capture("https://ws.sefaz.gov.br/soap", xml, "text/xml") == \
+        "<login><u>joao</u><p>[redacted]</p></login>"
+
+    js = json.dumps({"campo_x": "S3nh@ do cliente"}).encode()
+    assert "S3nh@" not in _capture("https://api.cliente.com.br/auth", js)
+
+
+def test_env_secrets_registered(monkeypatch):
+    monkeypatch.setenv("ONDEMAND_WEBHOOK_SECRET", "whsec_abcdef123")
+    monkeypatch.setenv("BW_PASSWORD", "master-pass-1")
+    monkeypatch.setenv("DEPLOYMENT_ENVIRONMENT", "production")
+    instruments._register_env_secrets()
+    body = _capture("https://x.com/a", b"whsec_abcdef123 master-pass-1 production")
+    assert body == "[redacted] [redacted] production"
+
+
+def test_short_values_are_not_registered():
+    register_secret("1234")
+    assert _capture("https://x.com/a", b'{"pin": "1234"}') == '{"pin": "1234"}'
 
 
 @pytest.mark.parametrize("url", [
-    "https://api.openai.com/v1/chat/completions",
-    "https://www.bb.com.br/login",
-    "https://cav.receita.fazenda.gov.br/",
-    "https://ondemand-ai.com.br.evil.net/",
+    "http://localhost:8087/unlock",
+    "http://127.0.0.1:8087/object/item/abc",
 ])
-def test_other_hosts_never_captured(url):
-    assert _capture(url, b'{"j_password": "segredo"}') is None
+def test_bitwarden_cli_server_never_captured(url):
+    span = _Span()
+    _httpx_request_hook(span, _RequestInfo(url, b'{"password": "master"}'))
+    assert span.attributes == {}
 
 
-def test_non_json_not_captured():
-    assert _capture("https://api.ondemand-ai.com.br/x", b"user=a&txtSenha=b") is None
+def test_multipart_and_binary_record_size_only():
+    span = _Span()
+    _httpx_request_hook(span, _RequestInfo("https://x.com/up", b"%PDF-1.7 ...",
+                                           "multipart/form-data; boundary=x"))
+    assert span.attributes == {"http.request.body.size": 12}
+    span = _Span()
+    _httpx_request_hook(span, _RequestInfo("https://x.com/up", b"\xff\xfe\x00"))
+    assert span.attributes == {"http.request.body.size": 3}
+
+
+def test_truncated_after_scrubbing(monkeypatch):
+    monkeypatch.setattr(instruments, "_BODY_CAPTURE_MAX", 20)
+    register_secret("abcdefghij")
+    body = _capture("https://x.com/a", b"0123456789abcdefghij")
+    assert body == "0123456789[redacted]"
 
 
 def test_redact_matches_key_substrings_case_insensitively():
@@ -89,10 +155,17 @@ def test_redact_matches_key_substrings_case_insensitively():
                    "nested": [{"apiKey": "[redacted]", "ok": 2}]}
 
 
-def test_wildcard_does_not_match_lookalike():
-    patterns = ("*.ondemand-ai.com.br",)
-    assert _host_matches("API.ONDEMAND-AI.COM.BR", patterns)
-    assert not _host_matches("evilondemand-ai.com.br", patterns)
+def test_requests_hook_captures_prepared_body():
+    import requests
+
+    register_secret("vault-pass-99")
+    prepared = requests.Request(
+        "POST", "https://api.cliente.com.br/login",
+        data={"login": "joao", "pwd_field": "vault-pass-99"},
+    ).prepare()
+    span = _Span()
+    _requests_request_hook(span, prepared)
+    assert span.attributes["http.request.body"] == "login=joao&pwd_field=[redacted]"
 
 
 # --------------------------------------------------------------------------- #
@@ -120,7 +193,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def server():
+def server(monkeypatch):
+    # The test server is on loopback, which production never records.
+    monkeypatch.setattr(instruments, "_NEVER_CAPTURE_HOSTS", ())
     srv = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_port}"
@@ -143,6 +218,11 @@ def error_log(monkeypatch):
     monkeypatch.setattr(logger, "handlers", [handler])
     monkeypatch.setattr(logger, "propagate", False)
     logger.setLevel(logging.WARNING)
+    # test_configure reloads ondemand_obs, so httpx may already carry a wrapper
+    # bound to that other module copy. Unwrap it and wrap with this one.
+    for cls in (httpx.Client, httpx.AsyncClient):
+        if getattr(cls.send, "_ondemand_obs", False):
+            monkeypatch.setattr(cls, "send", cls.send.__wrapped__)
     _install_error_response_logging()
     return handler.records
 
@@ -157,6 +237,7 @@ def test_error_json_body_logged_redacted(server, error_log):
     assert "CNPJ invalido" in body
     assert "abc123" not in body
     assert record.__dict__["http.response.status_code"] == 400
+    assert json.loads(record.__dict__["http.request.body"]) == {"x": 1}
 
 
 def test_error_logger_does_not_reach_root(server, error_log):
@@ -200,6 +281,31 @@ async def test_async_client_error_logged(server, error_log):
 
 def test_log_error_response_never_raises():
     _log_error_response(object(), object())
+    _requests_response_hook(None, object(), object())
+
+
+def test_requests_error_logged_with_what_we_sent(server, error_log):
+    import requests
+
+    register_secret("vault-pass-99")
+    _Handler.routes = {"/fail": (400, "application/json", b'{"erro": "competencia invalida"}')}
+    session = requests.Session()
+    response = session.post(f"{server}/fail", json={"competencia": "13/2026", "senha_x": "vault-pass-99"})
+    _requests_response_hook(None, response.request, response)
+    [record] = error_log
+    assert "competencia invalida" in record.__dict__["http.response.body"]
+    sent = json.loads(record.__dict__["http.request.body"])
+    assert sent == {"competencia": "13/2026", "senha_x": "[redacted]"}
+
+
+def test_requests_streaming_error_is_not_consumed(server, error_log):
+    import requests
+
+    _Handler.routes = {"/fail": (400, "application/json", b'{"error": "x"}')}
+    response = requests.get(f"{server}/fail", stream=True)
+    _requests_response_hook(None, response.request, response)
+    assert error_log == []
+    assert response.content == b'{"error": "x"}'
 
 
 # --------------------------------------------------------------------------- #
@@ -218,7 +324,6 @@ def test_request_body_with_real_instrumentor(server, monkeypatch):
     months. Drive the real instrumentor and transport so that cannot recur."""
     from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
-    monkeypatch.setattr(instruments, "_REQUEST_BODY_HOSTS", ("127.0.0.1",))
     _Handler.routes = {"/hook": (200, "application/json", b"{}")}
     provider, exporter = _provider()
 
@@ -236,6 +341,32 @@ def test_request_body_with_real_instrumentor(server, monkeypatch):
     [span] = exporter.get_finished_spans()
     body = json.loads(span.attributes["http.request.body"])
     assert body["payload"]["step_report"]["auth"]["access_token"] == "[redacted]"
+
+
+def test_request_body_with_real_requests_instrumentor(server, error_log):
+    """Same guard for requests: the hooks must match the signatures the real
+    instrumentor calls them with, or they silently capture nothing."""
+    import requests
+    from opentelemetry.instrumentation.requests import RequestsInstrumentor
+
+    register_secret("vault-pass-99")
+    _Handler.routes = {"/hook": (400, "application/json", b'{"erro": "x"}')}
+    provider, exporter = _provider()
+
+    instrumentor = RequestsInstrumentor()
+    if instrumentor.is_instrumented_by_opentelemetry:
+        instrumentor.uninstrument()
+    instrumentor.instrument(tracer_provider=provider, request_hook=_requests_request_hook,
+                            response_hook=_requests_response_hook)
+    try:
+        requests.post(f"{server}/hook", data={"cpf": "11122233344", "p": "vault-pass-99"})
+    finally:
+        instrumentor.uninstrument()
+
+    [span] = exporter.get_finished_spans()
+    assert span.attributes["http.request.body"] == "cpf=11122233344&p=[redacted]"
+    [record] = error_log
+    assert record.__dict__["http.request.body"] == "cpf=11122233344&p=[redacted]"
 
 
 # --------------------------------------------------------------------------- #

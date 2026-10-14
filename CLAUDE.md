@@ -4,7 +4,7 @@ OpenTelemetry observability for the Ondemand platform. Ships traces, metrics, an
 
 - **PyPI name:** `ondemand-obs`
 - **Import path:** `ondemand_obs`
-- **Current version:** 0.1.9 (see `pyproject.toml`)
+- **Current version:** 0.1.10 (see `pyproject.toml`)
 - **Python:** ≥ 3.9
 - **Branch:** `main`
 
@@ -42,16 +42,26 @@ ondemand_obs/
 
 - `[temporal]` — adds `temporalio>=1.7.0` for the Temporal `TracingInterceptor`
 - `[llm]` — OpenLLMetry instrumentors for the OpenAI and Anthropic SDKs (Python >= 3.10)
-- `[dev]` — pytest + pytest-asyncio + httpx + openai
+- `[dev]` — pytest + pytest-asyncio + httpx + requests + openai
 
-## What HTTP calls record (body policy, since 0.1.9)
+## What HTTP calls record (body policy, since 0.1.10)
+
+Every request body is recorded, on every host. What never reaches HyperDX is **our credentials**.
 
 | Call | Recorded |
 |---|---|
-| Robot → our API (`*.ondemand-ai.com.br`) | Span + request body as `http.request.body` (JSON only, 4 KB). Keys that *contain* password/senha/secret/token/api_key/authorization/credential are `[redacted]`. |
-| Robot → any other host | Span (URL, method, status, duration). **No request body**: no field-name list can recognise every site's password field, so third-party bodies are never captured. |
-| Any host answering 4xx/5xx | A WARN log on `ondemand_obs.http_errors` with the response body (JSON redacted, text/plain truncated, HTML/binary skipped), in the same trace. That logger does NOT propagate to root, so it never reaches the portal console. |
-| OpenAI / Anthropic SDK (`[llm]`) | A `gen_ai` span: model, input/output tokens, finish reason, tool call names, latency, errors. Prompt and completion **text are off** (`TRACELOOP_TRACE_CONTENT=false` by default; a deploy may set it to `true`). |
+| Robot → any host, via httpx or requests | Span + `http.request.body` (up to 64 KB) + `http.request.body.size`. JSON and form-encoded bodies have keys that *contain* password/senha/secret/token/api_key/authorization/credential `[redacted]`. Multipart and binary bodies (file uploads) record the size only. |
+| Robot → `localhost` / `127.0.0.1` / `::1` | Nothing. That is the Bitwarden CLI server: `/unlock` carries the master password, item responses carry every credential we hold. |
+| Any host answering 4xx/5xx | A WARN log on `ondemand_obs.http_errors` with the response body (JSON redacted, text/plain kept, HTML/binary skipped) **and the request body that provoked it**, in the same trace. That logger does NOT propagate to root, so it never reaches the portal console. |
+| OpenAI / Anthropic SDK (`[llm]`) | A `gen_ai` span: model, input/output tokens, finish reason, tool call names, latency, errors. The gen_ai span keeps prompt/completion text off (`TRACELOOP_TRACE_CONTENT=false`), but the **prompt is recorded** as the request body of the httpx span underneath. |
+
+**Our credentials are removed by value, not by field name.** `register_secret(value)` adds a value to a registry; every recorded body is scrubbed of each registered value, raw and URL-/JSON-encoded, before truncation. A site's password field can be called anything (`txtSenha`, `j_password`, `campo_x`), so a key list alone would leak one eventually. Sources:
+
+- At setup: every env var whose **name** contains one of the secret parts above (`HYPERDX_API_KEY`, `BW_PASSWORD`, `BW_CLIENTSECRET`, `ONDEMAND_WEBHOOK_SECRET`, `R2_SECRET_ACCESS_KEY`, ...).
+- At runtime: `ondemand-ai`'s `bw_get_item()` registers each item's password, TOTP seed and custom field values as it fetches them.
+- Values shorter than 6 characters are ignored (scrubbing `1234` from every body destroys data and protects nothing).
+
+Headers are never recorded, so `Authorization` / `x-webhook-secret` are not in scope.
 
 Playwright traffic is never seen: the browser's requests do not go through httpx.
 

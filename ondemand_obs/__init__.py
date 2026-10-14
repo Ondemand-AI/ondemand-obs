@@ -20,7 +20,7 @@ from .config import ObsConfig
 from .traces import setup_traces
 from .metrics import setup_metrics
 from .logs import setup_logs
-from .instruments import setup_instruments
+from .instruments import register_secret, setup_instruments
 
 logger = logging.getLogger("ondemand_obs")
 

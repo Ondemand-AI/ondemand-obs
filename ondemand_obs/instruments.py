@@ -1,28 +1,39 @@
 import json
 import logging
 import os
+from urllib.parse import parse_qsl, quote, quote_plus, urlsplit
 
-_BODY_CAPTURE_MAX = 4096
+_BODY_CAPTURE_MAX = 65536
 
-# Request bodies are recorded ONLY for our own API, where the robot's webhooks
-# go (step status, records, run report, artifacts): data the portal already
-# holds. Every other host is left alone. A robot talks to bank portals,
-# government sites and LLM APIs, whose bodies carry logins and prompts, and no
-# list of field names can recognise every site's password field ("txtSenha",
-# "j_password", a form-encoded login). An allowlist cannot leak the site
-# nobody thought of; a denylist can.
-_REQUEST_BODY_HOSTS = ("*.ondemand-ai.com.br",)
+# Request bodies are recorded for EVERY host: our API, bank portals, government
+# sites, LLM APIs. When a client's API rejects a call, what we sent is the first
+# thing anyone asks. What must never reach HyperDX is OUR credentials, and those
+# are removed by value (see register_secret), so a password is caught whatever
+# the site calls its field.
+#
+# The one exception is the Bitwarden CLI server on localhost: its /unlock call
+# carries the vault's master password and its item responses carry every
+# credential we hold. Nothing from loopback is recorded.
+_NEVER_CAPTURE_HOSTS = ("localhost", "127.0.0.1", "::1")
 
-# Any JSON key CONTAINING one of these (case-insensitive) is replaced by
-# "[redacted]" at any depth, in both captured request bodies and error
-# response bodies. Substring, not exact match, so access_token, j_password and
-# client_secret are caught too.
+# Any JSON or form key CONTAINING one of these (case-insensitive) is replaced by
+# "[redacted]" at any depth. Substring, not exact match, so access_token,
+# j_password and client_secret are caught too. This covers tokens a site hands
+# back to us, which no vault knows about.
 _SECRET_KEY_PARTS = (
     "password", "passwd", "senha", "secret", "token",
     "api_key", "apikey", "authorization", "credential",
 )
 
 _REDACTED = "[redacted]"
+
+# Our own credentials, by value: env vars whose name looks secret (read at
+# setup) plus whatever the SDK registers as it fetches vault items. Every
+# recorded body is scrubbed of each of them, raw and in the encodings a body
+# carries them in. Shorter values are skipped: scrubbing "1234" from every
+# body would destroy data and protect nothing.
+_MIN_SECRET_LEN = 6
+_secret_values = set()
 
 # Error responses go out as log records on this logger, wired straight to the
 # OTLP handler and NOT propagated to the root logger: the root also feeds the
@@ -31,15 +42,33 @@ _REDACTED = "[redacted]"
 _error_logger = logging.getLogger("ondemand_obs.http_errors")
 
 
-def _host_matches(host, patterns):
-    host = (host or "").lower().rstrip(".")
-    for pattern in patterns:
-        if pattern.startswith("*."):
-            if host.endswith(pattern[1:]):
-                return True
-        elif host == pattern:
-            return True
-    return False
+def register_secret(value):
+    """Never record `value` in any captured body. Safe to call before or
+    without configure_observability()."""
+    if not isinstance(value, str) or len(value) < _MIN_SECRET_LEN:
+        return
+    _secret_values.update({
+        value,
+        quote(value, safe=""),
+        quote_plus(value),
+        json.dumps(value, ensure_ascii=False)[1:-1],
+        json.dumps(value)[1:-1],
+    })
+
+
+def _register_env_secrets():
+    for name, value in os.environ.items():
+        if _is_secret_key(name):
+            register_secret(value)
+
+
+def _scrub(text):
+    # Longest first, so a value's encoded form is not half-replaced by a
+    # shorter secret it happens to contain.
+    for value in sorted(_secret_values, key=len, reverse=True):
+        if value in text:
+            text = text.replace(value, _REDACTED)
+    return text
 
 
 def _is_secret_key(key):
@@ -55,18 +84,54 @@ def _redact(value):
     return value
 
 
-def _redacted_json(raw):
-    """Parse JSON bytes and return them redacted and truncated, or None if the
-    body is not JSON. Redaction needs structure: a body we cannot parse is a
-    body we cannot vouch for."""
-    try:
-        parsed = json.loads(raw)
-    except (ValueError, TypeError):
+def _redact_form(text):
+    pairs = parse_qsl(text, keep_blank_values=True)
+    return "&".join(
+        f"{quote_plus(k)}={_REDACTED if _is_secret_key(k) else quote_plus(v)}"
+        for k, v in pairs
+    )
+
+
+def _format_body(raw, content_type):
+    """The text of a body as it will be recorded: secret-looking JSON and form
+    keys redacted, our own secrets scrubbed by value, then truncated. None for
+    multipart and binary bodies, which are files, not something to read."""
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8")
+    if not isinstance(raw, bytes) or not raw:
         return None
-    return json.dumps(_redact(parsed), ensure_ascii=False)[:_BODY_CAPTURE_MAX]
+    ctype = (content_type or "").lower()
+    if ctype.startswith("multipart/") or "octet-stream" in ctype:
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    try:
+        text = json.dumps(_redact(json.loads(text)), ensure_ascii=False)
+    except ValueError:
+        if "x-www-form-urlencoded" in ctype:
+            text = _redact_form(text)
+    # Scrub before truncating: a cut could split a secret and hide it from us.
+    return _scrub(text)[:_BODY_CAPTURE_MAX]
 
 
-def _request_body(request):
+def _host_is_excluded(host):
+    host = (host or "").lower().rstrip(".").strip("[]")
+    return host in _NEVER_CAPTURE_HOSTS
+
+
+def _record_request_body(span, host, raw, content_type):
+    if _host_is_excluded(host) or raw is None:
+        return
+    if isinstance(raw, (bytes, str)):
+        span.set_attribute("http.request.body.size", len(raw))
+    body = _format_body(raw, content_type)
+    if body:
+        span.set_attribute("http.request.body", body)
+
+
+def _httpx_body(request):
     """Raw bytes of an httpx request body, or None for a streaming body we must
     not consume. The instrumentor hands us a RequestInfo whose `stream` is an
     httpx.ByteStream holding the bytes in `_stream` (0.1.8 read `_buffer`,
@@ -78,52 +143,95 @@ def _request_body(request):
 
 def _httpx_request_hook(span, request):
     try:
-        if not _host_matches(request.url.host, _REQUEST_BODY_HOSTS):
-            return
-        raw = _request_body(request)
-        body = _redacted_json(raw) if raw else None
-        if body:
-            span.set_attribute("http.request.body", body)
+        _record_request_body(
+            span, request.url.host, _httpx_body(request),
+            request.headers.get("content-type"),
+        )
     except Exception:
         pass
 
 
-def _log_error_response(request, response):
+def _requests_body(request):
+    """A requests PreparedRequest body: bytes or str, or a generator/file for
+    a streaming upload, which we must not consume."""
+    body = getattr(request, "body", None)
+    return body if isinstance(body, (bytes, str)) else None
+
+
+def _requests_request_hook(span, request):
+    try:
+        _record_request_body(
+            span, urlsplit(request.url).hostname, _requests_body(request),
+            request.headers.get("content-type"),
+        )
+    except Exception:
+        pass
+
+
+def _log_error(method, host, path, status, response_headers, raw, request_body,
+               request_content_type):
     """Record the body of a 4xx/5xx response, where the other side explains
-    what went wrong. Any host: error bodies rarely carry credentials, and
-    secret-looking keys are redacted anyway. JSON is redacted; plain text is
-    truncated; HTML error pages and binary bodies are skipped."""
+    what went wrong, next to the request body that provoked it. JSON is
+    redacted, text/plain kept, HTML error pages and binary bodies skipped."""
+    if status < 400 or _host_is_excluded(host) or not raw:
+        return
+    content_type = response_headers.get("content-type", "").lower()
+    if "json" in content_type or content_type.startswith("text/plain"):
+        body = _format_body(raw, content_type)
+    else:
+        body = None
+    if not body:
+        return
+    extra = {
+        "http.response.status_code": status,
+        "http.request.method": method,
+        "server.address": host,
+        "url.path": path,
+        "http.response.body": body,
+    }
+    sent = _format_body(request_body, request_content_type) if request_body else None
+    if sent:
+        extra["http.request.body"] = sent
+    _error_logger.warning(
+        "HTTP %s %s %s%s -> %s: %s", status, method, host, path, status, body,
+        extra=extra,
+    )
+
+
+def _log_error_response(request, response):
+    """httpx: log an error response. A streaming response nobody has read is
+    skipped: consuming it here would steal the body from the caller."""
     try:
         if response.status_code < 400:
             return
         try:
             raw = response.content
         except Exception:
-            # Streaming response nobody has read: consuming it here would
-            # steal the body from the caller.
             return
-        if not raw:
+        try:
+            sent = request.content
+        except Exception:
+            sent = None
+        _log_error(
+            request.method, request.url.host, request.url.path,
+            response.status_code, response.headers, raw,
+            sent, request.headers.get("content-type"),
+        )
+    except Exception:
+        pass
+
+
+def _requests_response_hook(span, request, response):
+    """requests: log an error response. With stream=True the body is still
+    unread (`_content is False`) and belongs to the caller."""
+    try:
+        if response.status_code < 400 or getattr(response, "_content", False) is False:
             return
-        content_type = response.headers.get("content-type", "").lower()
-        if "json" in content_type:
-            body = _redacted_json(raw)
-        elif content_type.startswith("text/plain"):
-            body = raw.decode("utf-8", errors="replace")[:_BODY_CAPTURE_MAX]
-        else:
-            body = None
-        if not body:
-            return
-        _error_logger.warning(
-            "HTTP %s %s %s%s -> %s: %s",
-            response.status_code, request.method, request.url.host, request.url.path,
-            response.status_code, body,
-            extra={
-                "http.response.status_code": response.status_code,
-                "http.request.method": request.method,
-                "server.address": request.url.host,
-                "url.path": request.url.path,
-                "http.response.body": body,
-            },
+        url = urlsplit(request.url)
+        _log_error(
+            request.method, url.hostname, url.path,
+            response.status_code, response.headers, response.content,
+            _requests_body(request), request.headers.get("content-type"),
         )
     except Exception:
         pass
@@ -156,6 +264,8 @@ def _install_error_response_logging():
 
     send._ondemand_obs = True
     async_send._ondemand_obs = True
+    send.__wrapped__ = original_send
+    async_send.__wrapped__ = original_async_send
     httpx.Client.send = send
     httpx.AsyncClient.send = async_send
 
@@ -165,8 +275,9 @@ def _setup_llm_instruments():
     finish reason, tool calls, latency, errors. Only active when the
     [llm] extra and the SDK are installed.
 
-    Prompt and completion TEXT are off: our prompts carry client data. A deploy
-    can still turn them on with TRACELOOP_TRACE_CONTENT=true."""
+    The gen_ai span leaves prompt and completion TEXT off. The prompt is still
+    recorded, as the request body of the httpx span underneath it. A deploy
+    can put the text on the gen_ai span too with TRACELOOP_TRACE_CONTENT=true."""
     os.environ.setdefault("TRACELOOP_TRACE_CONTENT", "false")
 
     for module, cls in (
@@ -185,6 +296,8 @@ def _setup_llm_instruments():
 
 def setup_instruments(log_handler=None) -> None:
     """Register auto-instrumentation for common HTTP clients and LLM SDKs."""
+    _register_env_secrets()
+
     try:
         from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
         HTTPXClientInstrumentor().instrument(request_hook=_httpx_request_hook)
@@ -202,7 +315,10 @@ def setup_instruments(log_handler=None) -> None:
 
     try:
         from opentelemetry.instrumentation.requests import RequestsInstrumentor
-        RequestsInstrumentor().instrument()
+        RequestsInstrumentor().instrument(
+            request_hook=_requests_request_hook,
+            response_hook=_requests_response_hook if log_handler is not None else None,
+        )
     except ImportError:
         pass
 
