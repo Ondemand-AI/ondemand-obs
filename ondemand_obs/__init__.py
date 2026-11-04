@@ -74,6 +74,12 @@ def configure_observability(service_name: str, config: ObsConfig | None = None) 
 
         headers = {"authorization": config.api_key}
 
+        # Publish the endpoint we actually use, so anything that reads the env
+        # later sends to the same place: ondemand-ai forwards
+        # OTEL_EXPORTER_OTLP_ENDPOINT to the GPU pods and serverless workers it
+        # launches, which otherwise fall back to their own (older) default.
+        os.environ.setdefault("OTEL_EXPORTER_OTLP_ENDPOINT", config.endpoint)
+
         setup_traces(config.endpoint, headers, resource)
         setup_metrics(config.endpoint, headers, resource)
         _, handler = setup_logs(config.endpoint, headers, resource)

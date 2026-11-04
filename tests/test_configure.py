@@ -36,3 +36,26 @@ def test_configured_with_key(monkeypatch):
     obs.configure_observability("my-robot")
     assert obs.is_configured()
     assert obs.get_otlp_log_handler() is not None
+
+
+def test_default_endpoint_is_the_ondemand_hub(monkeypatch):
+    from ondemand_obs.config import ObsConfig
+
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    assert ObsConfig().endpoint == "https://otel.ondemand-ai.com.br"
+
+
+def test_configure_publishes_the_endpoint_for_child_processes(monkeypatch):
+    import ondemand_obs
+
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.setenv("HYPERDX_API_KEY", "test-key")
+    monkeypatch.setattr(ondemand_obs, "_configured", False)
+    for name in ("setup_traces", "setup_metrics", "setup_instruments"):
+        monkeypatch.setattr(ondemand_obs, name, lambda *a, **k: None)
+    monkeypatch.setattr(ondemand_obs, "setup_logs", lambda *a, **k: (None, None))
+
+    ondemand_obs.configure_observability("svc")
+
+    import os
+    assert os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] == "https://otel.ondemand-ai.com.br"
