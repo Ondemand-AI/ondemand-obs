@@ -4,7 +4,7 @@ OpenTelemetry observability for the Ondemand platform. Ships traces, metrics, an
 
 - **PyPI name:** `ondemand-obs`
 - **Import path:** `ondemand_obs`
-- **Current version:** 0.1.10 (see `pyproject.toml`)
+- **Current version:** 0.1.11 (see `pyproject.toml`)
 - **Python:** ≥ 3.9
 - **Branch:** `main`
 
@@ -36,7 +36,7 @@ ondemand_obs/
 |---|---|---|
 | `HYPERDX_API_KEY` | Yes — observability disabled if absent | — |
 | `OTEL_SERVICE_NAME` | No | passed to `configure_observability()` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | `https://in-otel.hyperdx.io` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | `https://otel.ondemand-ai.com.br` (the Ondemand hub, which fans out to hyperdx.io and our HyperDX v2) |
 
 ## Extras
 
