@@ -150,3 +150,23 @@ def test_fallback_dsn_when_no_own_dsn(monkeypatch):
     assert sentry_sdk.get_client().options["dsn"] == fallback
     sentry_sdk.get_client().close()
     errors._enabled = False
+
+
+def test_error_tags_carry_namespace_and_organization(events, monkeypatch):
+    from ondemand_obs import workflow_context as wc
+    import temporalio.activity
+
+    info = types.SimpleNamespace(
+        workflow_id="wf-1", workflow_run_id="run-1", workflow_type="W",
+        activity_type="a", activity_id="1", attempt=2, task_queue="q", namespace="gse",
+    )
+    monkeypatch.setattr(temporalio.activity, "info", lambda: info)
+    token = wc.bind_organization("org-42")
+    try:
+        errors.capture_exception(_raise(ValueError("boom")))
+    finally:
+        wc.reset_organization(token)
+    tags = events[-1]["tags"]
+    assert tags["TemporalNamespace"] == "gse"
+    assert tags["OrganizationID"] == "org-42"
+    assert tags["TemporalWorkflowID"] == "wf-1"

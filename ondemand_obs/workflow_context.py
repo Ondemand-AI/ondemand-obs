@@ -18,27 +18,70 @@ HyperDX meant full-text searching a UUID instead of filtering a field.
 This span processor puts the same two attribute names on everything the process
 emits, deliberately reusing Temporal's spelling rather than inventing a third
 one. One name per identifier, across every service.
+
+Since 0.1.14 it also stamps WHOSE run it is, so one robot's telemetry and errors
+can be filtered by client:
+
+  TemporalNamespace  the run's Temporal namespace. In production that is the
+                     organization's code (executor.js starts each run in
+                     `organization.code`); in development every organization
+                     shares `dev`.
+  OrganizationID     the portal's organization id (organizations.id), from the
+                     run's WorkflowInput. Not in Temporal's info, so the worker
+                     binds it per activity (bind_organization, called by
+                     ondemand-ai's activity interceptor). A contextvar, so
+                     concurrent activities on one pod never mix them up;
+                     temporalio copies the context into sync activities' threads.
 """
+
+import contextvars
 
 from opentelemetry.sdk.trace import SpanProcessor
 
 WORKFLOW_ID_KEY = "TemporalWorkflowID"
 RUN_ID_KEY = "TemporalRunID"
+NAMESPACE_KEY = "TemporalNamespace"
+ORGANIZATION_ID_KEY = "OrganizationID"
+
+_organization_id: contextvars.ContextVar = contextvars.ContextVar(
+    "ondemand_obs_organization_id", default=None
+)
 
 
-def _current_ids():
+def bind_organization(organization_id):
+    """Mark the current task's telemetry and errors as belonging to this
+    organization. Returns a token for reset_organization(). Empty values are
+    ignored (the token then resets to the current value)."""
+    return _organization_id.set(organization_id or _organization_id.get())
+
+
+def reset_organization(token) -> None:
+    try:
+        _organization_id.reset(token)
+    except Exception:
+        pass
+
+
+def current_organization_id():
+    return _organization_id.get()
+
+
+def _current_context():
     """
     Read the identifiers from whichever Temporal context is active.
 
-    Returns (workflow_id, run_id), either of which may be None. Safe to call
-    outside a workflow or activity — temporalio raises when there is no context,
-    and there frequently isn't (worker startup, shutdown, background tasks).
+    Returns (workflow_id, run_id, namespace), any of which may be None. Safe to
+    call outside a workflow or activity — temporalio raises when there is no
+    context, and there frequently isn't (worker startup, shutdown, background
+    tasks).
     """
     try:
         from temporalio import activity
 
         info = activity.info()
-        return info.workflow_id, info.workflow_run_id
+        # `namespace` on recent temporalio; `workflow_namespace` (deprecated) before.
+        namespace = getattr(info, "namespace", None) or getattr(info, "workflow_namespace", None)
+        return info.workflow_id, info.workflow_run_id, namespace
     except Exception:
         pass
 
@@ -46,23 +89,39 @@ def _current_ids():
         from temporalio import workflow
 
         info = workflow.info()
-        return info.workflow_id, info.run_id
+        return info.workflow_id, info.run_id, info.namespace
     except Exception:
-        return None, None
+        return None, None, None
+
+
+def _current_ids():
+    """(workflow_id, run_id) — kept for callers of the pre-0.1.14 name."""
+    workflow_id, run_id, _ = _current_context()
+    return workflow_id, run_id
+
+
+def current_attributes() -> dict:
+    """Every identifier above that is known right now, by attribute name."""
+    workflow_id, run_id, namespace = _current_context()
+    attrs = {
+        WORKFLOW_ID_KEY: workflow_id,
+        RUN_ID_KEY: run_id,
+        NAMESPACE_KEY: namespace,
+        ORGANIZATION_ID_KEY: current_organization_id(),
+    }
+    return {k: v for k, v in attrs.items() if v}
 
 
 class TemporalIdSpanProcessor(SpanProcessor):
-    """Adds the Temporal identifier pair to every span at start."""
+    """Adds the run identifiers (current_attributes) to every span at start."""
 
     def on_start(self, span, parent_context=None):
-        workflow_id, run_id = _current_ids()
         # Never overwrite: on spans the TracingInterceptor created, its values
         # are authoritative.
         attrs = span.attributes or {}
-        if workflow_id and WORKFLOW_ID_KEY not in attrs:
-            span.set_attribute(WORKFLOW_ID_KEY, workflow_id)
-        if run_id and RUN_ID_KEY not in attrs:
-            span.set_attribute(RUN_ID_KEY, run_id)
+        for key, value in current_attributes().items():
+            if key not in attrs:
+                span.set_attribute(key, value)
 
     def on_end(self, span):
         pass
@@ -76,16 +135,13 @@ class TemporalIdSpanProcessor(SpanProcessor):
 
 class TemporalIdLogFilter:
     """
-    Logging filter that attaches the same pair to every record.
+    Logging filter that attaches the same identifiers to every record.
 
     Installed as a filter rather than a Formatter change so it reaches the OTLP
     handler as structured attributes, not as text baked into the message.
     """
 
     def filter(self, record):
-        workflow_id, run_id = _current_ids()
-        if workflow_id:
-            setattr(record, WORKFLOW_ID_KEY, workflow_id)
-        if run_id:
-            setattr(record, RUN_ID_KEY, run_id)
+        for key, value in current_attributes().items():
+            setattr(record, key, value)
         return True

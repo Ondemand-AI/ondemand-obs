@@ -19,7 +19,8 @@ out a second way, and only exceptions:
 Opt-in: nothing happens unless SENTRY_DSN is set. Each event is linked to the
 active OTel span (trace_id/span_id, as Better Stack documents) and tagged with
 the Temporal identifier pair under the platform's spelling, TemporalWorkflowID
-and TemporalRunID, plus the workflow/activity type and attempt.
+and TemporalRunID, the TemporalNamespace and OrganizationID of the run, plus the
+workflow/activity type and attempt.
 
 Temporal catches activity exceptions and turns them into failures, so Sentry's
 global hooks never see them. ondemand-ai's worker interceptor calls
@@ -49,7 +50,19 @@ _lock = threading.Lock()
 
 
 def _temporal_tags() -> dict:
-    """Temporal context of the current task, as Sentry tags. Empty outside one."""
+    """Temporal context of the current task, as Sentry tags. Empty outside one.
+
+    Includes TemporalNamespace and OrganizationID (see workflow_context), so a
+    robot's errors can be filtered by client inside its own Errors app."""
+    from .workflow_context import current_attributes
+
+    tags = _temporal_info_tags()
+    for k, v in current_attributes().items():
+        tags.setdefault(k, v)
+    return tags
+
+
+def _temporal_info_tags() -> dict:
     try:
         from temporalio import activity
 

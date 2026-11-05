@@ -4,7 +4,7 @@ OpenTelemetry observability for the Ondemand platform. Ships traces, metrics, an
 
 - **PyPI name:** `ondemand-obs`
 - **Import path:** `ondemand_obs`
-- **Current version:** 0.1.13 (see `pyproject.toml`)
+- **Current version:** 0.1.14 (see `pyproject.toml`)
 - **Python:** ≥ 3.9
 - **Branch:** `main`
 
@@ -61,7 +61,7 @@ KEDA rejects a duplicate env name), `configure_error_tracking()` (also called by
   frames, and no events from log records (a log + raise would report twice);
 - `before_send` links the event to the active OTel span (`contexts.trace`
   trace_id/span_id, Better Stack's documented hook), tags `TemporalWorkflowID`,
-  `TemporalRunID`, workflow/activity type and attempt, and scrubs every string
+  `TemporalRunID`, `TemporalNamespace`, `OrganizationID`, workflow/activity type and attempt, and scrubs every string
   of the registered secrets;
 - `capture_exception(exc, tags=...)` reports an exception once (a marker on the
   object drops any later report of it). Temporal swallows activity exceptions,
@@ -119,6 +119,12 @@ of a Workflow Execution. Temporal identifies one by a **pair**:
 - **HyperDX:** `TemporalWorkflowID` and `TemporalRunID` on every span *and* every
   log, in every service — the same spelling Temporal's own `TracingInterceptor`
   writes, so one filter follows a run portal → API → robot.
+- **Whose run (since 0.1.14):** `TemporalNamespace` (the organization's code in
+  production; `dev` for everyone in development) and `OrganizationID` (the
+  portal's `organizations.id`, from the run's `WorkflowInput`) on every span, log
+  and error. The worker binds the organization per activity with
+  `bind_organization()` (ondemand-ai's activity interceptor); it is a contextvar,
+  so concurrent activities never mix them up.
 - **Python:** `current_workflow_id()` and `current_temporal_run_id()` in
   `ondemand.shared.run_context`. Env var: `ONDEMAND_WORKFLOW_ID`.
 
