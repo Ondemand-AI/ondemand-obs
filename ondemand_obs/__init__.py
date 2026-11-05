@@ -7,6 +7,9 @@ Usage in workers (automatic via ondemand-python SDK — no direct call needed):
     configure_observability("my-robot")
 
 Set HYPERDX_API_KEY in env to enable. No-op if the key is absent.
+
+Error tracking (Better Stack Errors, via the Sentry SDK) is separate and
+opt-in: set SENTRY_DSN. See errors.py.
 """
 
 import logging
@@ -21,6 +24,12 @@ from .traces import setup_traces
 from .metrics import setup_metrics
 from .logs import setup_logs
 from .instruments import register_secret, setup_instruments
+from .errors import (
+    capture_exception,
+    configure_error_tracking,
+    error_tracking_enabled,
+    flush_errors,
+)
 
 logger = logging.getLogger("ondemand_obs")
 
@@ -53,6 +62,10 @@ def configure_observability(service_name: str, config: ObsConfig | None = None) 
 
     if config is None:
         config = ObsConfig()
+
+    # Independent of HYPERDX_API_KEY: errors go to Better Stack through the
+    # Sentry SDK whenever SENTRY_DSN is set. Idempotent, never raises.
+    configure_error_tracking(service_name)
 
     if not config.api_key:
         return

@@ -4,7 +4,7 @@ OpenTelemetry observability for the Ondemand platform. Ships traces, metrics, an
 
 - **PyPI name:** `ondemand-obs`
 - **Import path:** `ondemand_obs`
-- **Current version:** 0.1.11 (see `pyproject.toml`)
+- **Current version:** 0.1.12 (see `pyproject.toml`)
 - **Python:** ≥ 3.9
 - **Branch:** `main`
 
@@ -27,7 +27,8 @@ ondemand_obs/
 ├── metrics.py       # MeterProvider setup
 ├── logs.py          # LoggerProvider + log handler
 ├── instruments.py   # httpx/requests + LLM SDK auto-instrumentation, body capture policy
-└── temporal.py      # Temporal TracingInterceptor (requires [temporal] extra)
+├── temporal.py      # Temporal TracingInterceptor (requires [temporal] extra)
+└── errors.py        # Error tracking: Sentry SDK -> Better Stack Errors (opt-in, SENTRY_DSN)
 ```
 
 ## Environment variables
@@ -37,12 +38,32 @@ ondemand_obs/
 | `HYPERDX_API_KEY` | Yes — observability disabled if absent | — |
 | `OTEL_SERVICE_NAME` | No | passed to `configure_observability()` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | No | `https://otel.ondemand-ai.com.br` (the Ondemand hub, which fans out to hyperdx.io and our HyperDX v2) |
+| `SENTRY_DSN` | No — error tracking disabled if absent | — (robots: key `SENTRY_DSN` in the `ondemand-shared` k8s secret, the Better Stack "Ondemand AI - Automations" Errors app) |
+| `SENTRY_ENVIRONMENT` / `SENTRY_RELEASE` | No | `DEPLOYMENT_ENVIRONMENT`, else `development` / unset |
 
 ## Extras
 
 - `[temporal]` — adds `temporalio>=1.7.0` for the Temporal `TracingInterceptor`
 - `[llm]` — OpenLLMetry instrumentors for the OpenAI and Anthropic SDKs (Python >= 3.10)
 - `[dev]` — pytest + pytest-asyncio + httpx + requests + openai
+
+## Error tracking (since 0.1.12)
+
+Better Stack **Error tracking** only ingests Sentry-SDK events: an OTel span
+exception event or an ERROR log never becomes an Errors entry. So with
+`SENTRY_DSN` set, `configure_error_tracking()` (also called by
+`configure_observability()`) starts `sentry-sdk` 2.x for exceptions only:
+
+- no Sentry tracing (`traces_sample_rate=0`), no trace headers on outgoing calls,
+  no auto-enabled integrations (OTel instruments those), no local variables in
+  frames, and no events from log records (a log + raise would report twice);
+- `before_send` links the event to the active OTel span (`contexts.trace`
+  trace_id/span_id, Better Stack's documented hook), tags `TemporalWorkflowID`,
+  `TemporalRunID`, workflow/activity type and attempt, and scrubs every string
+  of the registered secrets;
+- `capture_exception(exc, tags=...)` reports an exception once (a marker on the
+  object drops any later report of it). Temporal swallows activity exceptions,
+  so `ondemand-ai`'s worker interceptor calls it per failed attempt.
 
 ## What HTTP calls record (body policy, since 0.1.10)
 
