@@ -48,6 +48,7 @@ def _raise(exc):
 
 def test_noop_without_dsn(monkeypatch):
     monkeypatch.delenv("SENTRY_DSN", raising=False)
+    monkeypatch.delenv("SENTRY_DSN_FALLBACK", raising=False)
     monkeypatch.setattr(errors, "_enabled", False)
     assert errors.configure_error_tracking("svc") is False
     assert not errors.error_tracking_enabled()
@@ -128,3 +129,24 @@ def test_error_logs_do_not_become_events(events):
     logging.getLogger("robot").error("handled, logged, not an event")
     sentry_sdk.flush()
     assert events == []
+
+
+def test_own_dsn_wins_over_fallback(monkeypatch):
+    monkeypatch.setenv("SENTRY_DSN", DSN)
+    monkeypatch.setenv("SENTRY_DSN_FALLBACK", "https://other@errors.example.invalid/2")
+    monkeypatch.setattr(errors, "_enabled", False)
+    assert errors.configure_error_tracking("svc") is True
+    assert sentry_sdk.get_client().options["dsn"] == DSN
+    sentry_sdk.get_client().close()
+    errors._enabled = False
+
+
+def test_fallback_dsn_when_no_own_dsn(monkeypatch):
+    fallback = "https://shared@errors.example.invalid/2"
+    monkeypatch.delenv("SENTRY_DSN", raising=False)
+    monkeypatch.setenv("SENTRY_DSN_FALLBACK", fallback)
+    monkeypatch.setattr(errors, "_enabled", False)
+    assert errors.configure_error_tracking("svc") is True
+    assert sentry_sdk.get_client().options["dsn"] == fallback
+    sentry_sdk.get_client().close()
+    errors._enabled = False

@@ -34,6 +34,11 @@ import threading
 logger = logging.getLogger("ondemand_obs")
 
 DSN_ENV = "SENTRY_DSN"
+# Used only when SENTRY_DSN is unset. Robots get SENTRY_DSN from their own Errors
+# app (k8s secret ondemand-sentry, key = process id) and this one from the shared
+# "Automations (sem app própria)" app, so a robot without an app of its own still
+# reports. Two names because KEDA's ScaledJob schema rejects a duplicate env name.
+FALLBACK_DSN_ENV = "SENTRY_DSN_FALLBACK"
 
 # Set on an exception once it has been reported, so a later path (the
 # excepthook, the worker's crash handler) does not report the same object again.
@@ -146,12 +151,13 @@ def configure_error_tracking(service_name: str, dsn: str = None) -> bool:
     """Start reporting exceptions to Better Stack Errors. Idempotent.
 
     Returns True when error tracking is active. A no-op returning False when no
-    DSN is configured (SENTRY_DSN) or sentry-sdk is not installed; it never
-    raises, because error reporting must not stop a robot from starting.
+    DSN is configured (SENTRY_DSN, else SENTRY_DSN_FALLBACK) or sentry-sdk is
+    not installed; it never raises, because error reporting must not stop a
+    robot from starting.
     """
     global _enabled
 
-    dsn = dsn or os.environ.get(DSN_ENV, "")
+    dsn = dsn or os.environ.get(DSN_ENV, "") or os.environ.get(FALLBACK_DSN_ENV, "")
     if not dsn:
         return False
 

@@ -4,7 +4,7 @@ OpenTelemetry observability for the Ondemand platform. Ships traces, metrics, an
 
 - **PyPI name:** `ondemand-obs`
 - **Import path:** `ondemand_obs`
-- **Current version:** 0.1.12 (see `pyproject.toml`)
+- **Current version:** 0.1.13 (see `pyproject.toml`)
 - **Python:** ≥ 3.9
 - **Branch:** `main`
 
@@ -51,7 +51,9 @@ ondemand_obs/
 
 Better Stack **Error tracking** only ingests Sentry-SDK events: an OTel span
 exception event or an ERROR log never becomes an Errors entry. So with
-`SENTRY_DSN` set, `configure_error_tracking()` (also called by
+`SENTRY_DSN` set (else `SENTRY_DSN_FALLBACK`, since 0.1.13: a robot's own Errors
+app comes as `SENTRY_DSN`, the shared fallback app under the second name because
+KEDA rejects a duplicate env name), `configure_error_tracking()` (also called by
 `configure_observability()`) starts `sentry-sdk` 2.x for exceptions only:
 
 - no Sentry tracing (`traces_sample_rate=0`), no trace headers on outgoing calls,
