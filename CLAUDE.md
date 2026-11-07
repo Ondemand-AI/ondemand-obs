@@ -1,10 +1,10 @@
 # ondemand-obs — Observability Layer
 
-OpenTelemetry observability for the Ondemand platform. Ships traces, metrics, and logs to HyperDX (or any OTLP-compatible backend).
+OpenTelemetry observability for the Ondemand platform. Ships traces, metrics, and logs to the Ondemand telemetry hub, which exports to our self-hosted HyperDX v1 and Better Stack (or to any OTLP-compatible backend you point it at).
 
 - **PyPI name:** `ondemand-obs`
 - **Import path:** `ondemand_obs`
-- **Current version:** 0.1.14 (see `pyproject.toml`)
+- **Current version:** 0.1.15 (see `pyproject.toml`)
 - **Python:** ≥ 3.9
 - **Branch:** `main`
 
@@ -37,8 +37,9 @@ ondemand_obs/
 |---|---|---|
 | `HYPERDX_API_KEY` | Yes — observability disabled if absent | — |
 | `OTEL_SERVICE_NAME` | No | passed to `configure_observability()` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | `https://otel.ondemand-ai.com.br` (the Ondemand hub, which fans out to hyperdx.io and our HyperDX v2) |
-| `SENTRY_DSN` | No — error tracking disabled if absent | — (robots: key `SENTRY_DSN` in the `ondemand-shared` k8s secret, the Better Stack "Ondemand AI - Automations" Errors app) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | `https://otel.ondemand-ai.com.br` (the Ondemand hub on the VPS, which exports to our self-hosted HyperDX v1 and to Better Stack) |
+| `SENTRY_DSN` | No (error tracking off when neither it nor `SENTRY_DSN_FALLBACK` is set) | unset. Robots: the robot's own Better Stack Errors app, key `<process_id>` of the `ondemand-sentry` k8s secret (created by `robot-gke-deploy.yml` in ondemand-infra) |
+| `SENTRY_DSN_FALLBACK` | No, used only when `SENTRY_DSN` is unset (since 0.1.13) | unset. Robots: key `SENTRY_DSN` of the `ondemand-shared` k8s secret, the shared "Automations (sem app própria)" Errors app |
 | `SENTRY_ENVIRONMENT` / `SENTRY_RELEASE` | No | `DEPLOYMENT_ENVIRONMENT`, else `development` / unset |
 
 ## Extras
