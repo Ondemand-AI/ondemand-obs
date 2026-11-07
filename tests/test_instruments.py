@@ -383,7 +383,10 @@ CHAT_COMPLETION = json.dumps({
 
 def test_openai_call_traced_without_content(server, monkeypatch):
     openai = pytest.importorskip("openai")
-    from opentelemetry.instrumentation.openai import OpenAIInstrumentor
+    # The [llm] extra is Python >= 3.10 only; on 3.9 there is nothing to test.
+    OpenAIInstrumentor = pytest.importorskip(
+        "opentelemetry.instrumentation.openai"
+    ).OpenAIInstrumentor
 
     monkeypatch.delenv("TRACELOOP_TRACE_CONTENT", raising=False)
     _Handler.routes = {"/v1/chat/completions": (200, "application/json", CHAT_COMPLETION)}

@@ -16,6 +16,7 @@ import logging
 import os
 import threading
 from importlib.metadata import PackageNotFoundError, version as _dist_version
+from typing import Optional
 
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME
 
@@ -39,7 +40,7 @@ from .workflow_context import (
 logger = logging.getLogger("ondemand_obs")
 
 
-def _dist(name: str) -> str | None:
+def _dist(name: str) -> Optional[str]:
     try:
         return _dist_version(name)
     except PackageNotFoundError:
@@ -62,7 +63,7 @@ _lock = threading.Lock()
 _log_handler = None
 
 
-def configure_observability(service_name: str, config: ObsConfig | None = None) -> None:
+def configure_observability(service_name: str, config: Optional[ObsConfig] = None) -> None:
     global _configured, _log_handler
 
     if config is None:
@@ -122,7 +123,7 @@ def is_configured() -> bool:
     return _configured
 
 
-def get_otlp_log_handler() -> logging.Handler | None:
+def get_otlp_log_handler() -> Optional[logging.Handler]:
     """Return the OTLP LoggingHandler, or None if not configured."""
     return _log_handler
 
